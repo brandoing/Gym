@@ -257,10 +257,23 @@ async def test_malformed_action_and_case_change_are_distinct_failures(tmp_path):
     observation, reward, terminated, truncated, info = await server.step(bad, {"case_id": "fixture-1"}, "one")
     assert "JSON" in observation and reward == 0 and not terminated and not truncated
     assert not info["mask_sample"] and info["turns"] == 1
+    assert info["tool_outputs"] == [{"call_id": "call-12", "output": json.dumps({"error": observation})}]
     _, _, terminated, _, info = await server.step(
         action("ask_patient", {"question_key": "color"}), {"case_id": "other"}, "one"
     )
     assert terminated and info["mask_sample"] and not info["evaluation_completed"]
+
+
+async def test_invalid_multiple_calls_all_receive_error_outputs(tmp_path):
+    server = make_server(tmp_path)
+    await server.reset({"case_id": "fixture-1"}, "one")
+    response = action("ask_patient", {"question_key": "color"}, token=12)
+    response.output.extend(action("unknown_tool", {}, token=13).output)
+    observation, _, terminated, truncated, info = await server.step(response, {"case_id": "fixture-1"}, "one")
+    assert not terminated and not truncated
+    assert [row["call_id"] for row in info["tool_outputs"]] == ["call-12", "call-13"]
+    assert all(json.loads(row["output"])["error"] == observation for row in info["tool_outputs"])
+    assert server.session_state["one"]["asked_keys"] == []
 
 
 def test_http_lifecycle_closes_completed_episode(tmp_path):

@@ -119,17 +119,17 @@ class ClinicalPatientServer(GymnasiumServer, ClinicalConsultationServer):
         visible_action = action.output_text + " " + " ".join(call.name + " " + call.arguments for call in calls)
         state["history"].append({"role": "assistant", "content": visible_action.strip()})
         if len(calls) != 1:
-            return self._invalid_action(state, "Use exactly one supported function call per turn.")
+            return self._invalid_action(state, "Use exactly one supported function call per turn.", action)
         call = calls[0]
         try:
             arguments = json.loads(call.arguments)
             if not isinstance(arguments, dict):
                 raise ValueError("Arguments must be a JSON object")
         except (ValueError, TypeError):
-            return self._invalid_action(state, "Function arguments must be a JSON object.")
+            return self._invalid_action(state, "Function arguments must be a JSON object.", action)
         if call.name == "ask_patient":
             if set(arguments) != {"question_key"} or not isinstance(arguments["question_key"], str):
-                return self._invalid_action(state, "ask_patient requires one string question_key.")
+                return self._invalid_action(state, "ask_patient requires one string question_key.", action)
             key = arguments["question_key"]
             if key in state["asked_keys"]:
                 state["repeated_questions"] += 1
@@ -162,9 +162,9 @@ class ClinicalPatientServer(GymnasiumServer, ClinicalConsultationServer):
                 },
             )
         if call.name != "finish_consultation" or set(arguments) != {"urgency", "plan"}:
-            return self._invalid_action(state, "Use ask_patient or finish_consultation(urgency, plan).")
+            return self._invalid_action(state, "Use ask_patient or finish_consultation(urgency, plan).", action)
         if not all(isinstance(arguments[key], str) and arguments[key].strip() for key in ("urgency", "plan")):
-            return self._invalid_action(state, "Completion requires nonempty urgency and plan strings.")
+            return self._invalid_action(state, "Completion requires nonempty urgency and plan strings.", action)
         state["done"] = True
         evidence_complete = set(case.patient.required_facts) <= set(state["asked_keys"])
         urgency_correct = arguments["urgency"].strip().lower() == case.patient.expected_urgency.strip().lower()
@@ -232,15 +232,25 @@ class ClinicalPatientServer(GymnasiumServer, ClinicalConsultationServer):
             "mask_sample": False,
         }
 
-    def _invalid_action(self, state: dict, observation: str) -> tuple[str | None, float, bool, bool, dict]:
+    def _invalid_action(
+        self, state: dict, observation: str, action: NeMoGymResponse
+    ) -> tuple[str | None, float, bool, bool, dict]:
         truncated = state["turns"] >= self.config.max_turns
         state["done"] = truncated
+        # Resolve every pending tool call so a policy mistake remains a recoverable
+        # task error rather than an invalid next request to the model endpoint.
+        tool_outputs = [
+            {"call_id": item.call_id, "output": json.dumps({"error": observation})}
+            for item in action.output
+            if item.type == "function_call"
+        ]
         return (
             observation,
             self.task_failure_reward(self.get_case(state["case_id"])) if truncated else 0,
             False,
             truncated,
-            self._episode_info(state) | {"failure_kind": "clinical_patient:invalid_action"},
+            self._episode_info(state)
+            | {"failure_kind": "clinical_patient:invalid_action", "tool_outputs": tool_outputs},
         )
 
 

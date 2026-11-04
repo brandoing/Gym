@@ -18,7 +18,9 @@ No separately hosted patient model is required. Configurations remain unverified
    require completion on the first turn. These are synthetic task gates, not a medical verifier.
 4. The terminal judge checks the prompt's rubric criteria against the visible
    interaction and final plan, grounded in `patient.reference_plan`. Missing evidence, incorrect urgency,
-   delayed escalation or failure to finish within six assistant turns scores zero.
+   delayed escalation or failure to finish within six assistant turns receives the
+   mode's minimum reward (zero for holistic/protocol; the case's negative-weight
+   lower bound for additive). Abandoning a task cannot beat a penalized response.
    Unavailable judging masks the episode instead of treating it as a clinical failure.
 
 The server tracks state per session and the Gymnasium lifecycle closes completed,
@@ -52,10 +54,12 @@ use the example config's public ontology. Compute and supply its SHA-256 before 
 
 Provide the remote judge through `JUDGE_BASE_URL`, `JUDGE_MODEL_NAME`,
 `JUDGE_MODEL_REVISION` and private `JUDGE_API_KEY`. `CLINICAL_REWARD_MODE` accepts
-`additive` (default) or `protocol`. Additive mode checks each prompt-specific criterion
-and aggregates signed points; protocol mode checks conjunctive dimensions. The number
-of judge calls depends on those checks and bounded retries. No overall quality scale
-is used. Preserve judge usage/cost alongside policy training cost.
+`rar_holistic` (default), `additive` or `protocol`. Holistic scoring reads the whole
+case-specific rubric and returns one 1–10 score, normalized to 0–1. It is not a
+rubric-free quality judge. Additive checks each criterion and preserves the signed
+aggregate without clipping; protocol checks conjunctive dimensions. The number
+of judge calls depends on those checks and bounded retries. Preserve judge usage/cost
+alongside policy training cost.
 
 Compose `resources_servers/clinical_patient/configs/clinical_patient.yaml` with the
 policy model configuration. NeMo RL uses

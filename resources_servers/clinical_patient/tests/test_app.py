@@ -83,7 +83,7 @@ async def test_conditional_disclosure_and_full_transcript_terminal_grading(tmp_p
     assert json.loads(info["tool_outputs"][0]["output"]) == {"question_key": "color", "answer": "red"}
     with patch(
         "resources_servers.clinical_consultation.app.call_judge",
-        AsyncMock(side_effect=[completion('{"criteria_met":true}'), completion('{"criteria_met":false}')]),
+        AsyncMock(return_value=completion('{"score":10}')),
     ) as judge:
         _, reward, terminated, truncated, info = await server.step(
             action("finish_consultation", {"urgency": "routine", "plan": "Stop the simulation."}),
@@ -91,7 +91,8 @@ async def test_conditional_disclosure_and_full_transcript_terminal_grading(tmp_p
             "one",
         )
     assert reward == 1 and terminated and not truncated
-    assert info["evidence_complete"] and info["judge_calls"] == 2
+    assert info["evidence_complete"] and info["judge_calls"] == 1
+    assert server.config.reward_mode == "rar_holistic"
     context = json.loads(judge.call_args.kwargs["json"].messages[1]["content"])
     assert "ask_patient" in context["conversation"] and "red" in context["conversation"]
     assert context["reference_answer"] == patient_case()["patient"]["reference_plan"]
@@ -112,7 +113,7 @@ async def test_cannot_finish_without_required_evidence_or_correct_urgency(tmp_pa
     judge.assert_not_called()
 
 
-@pytest.mark.parametrize("mode", ["additive", "protocol"])
+@pytest.mark.parametrize("mode", ["rar_holistic", "additive", "protocol"])
 async def test_known_information_can_complete_without_questioning(tmp_path, mode):
     row = patient_case()
     row["patient"]["required_facts"] = []
@@ -120,7 +121,11 @@ async def test_known_information_can_complete_without_questioning(tmp_path, mode
     await server.reset({"case_id": "fixture-1"}, "one")
     with patch(
         "resources_servers.clinical_consultation.app.call_judge",
-        AsyncMock(side_effect=[completion('{"criteria_met":true}'), completion('{"criteria_met":false}')]),
+        AsyncMock(
+            side_effect=[completion('{"score":10}')]
+            if mode == "rar_holistic"
+            else [completion('{"criteria_met":true}'), completion('{"criteria_met":false}')]
+        ),
     ):
         _, reward, terminated, _, info = await server.step(
             action("finish_consultation", {"urgency": "routine", "plan": "Stop."}), {"case_id": "fixture-1"}, "one"
@@ -129,10 +134,30 @@ async def test_known_information_can_complete_without_questioning(tmp_path, mode
     assert info["judge_calls"] == (2 if mode == "additive" else 1)
 
 
-@pytest.mark.parametrize("removed_mode", ["likert", "rar_holistic"])
-def test_patient_rejects_overall_rating_modes(tmp_path, removed_mode):
+def test_patient_rejects_plain_likert(tmp_path):
     with pytest.raises(ValueError, match="reward_mode"):
-        make_server(tmp_path, reward_mode=removed_mode)
+        make_server(tmp_path, reward_mode="likert")
+
+
+@pytest.mark.parametrize("failure", ["missing_evidence", "turn_limit", "invalid_at_limit"])
+async def test_additive_task_failures_cannot_outscore_negative_answers(tmp_path, failure):
+    server = make_server(tmp_path, reward_mode="additive")
+    await server.reset({"case_id": "fixture-1"}, "one")
+    if failure == "missing_evidence":
+        response = action("finish_consultation", {"urgency": "routine", "plan": "Stop."})
+    else:
+        server.session_state["one"]["turns"] = 5
+        response = action("ask_patient", {"question_key": "color"})
+        if failure == "invalid_at_limit":
+            response.output[0].arguments = "not JSON"
+    _, reward, terminated, truncated, info = await server.step(response, {"case_id": "fixture-1"}, "one")
+    row = patient_case()
+    lower_bound = sum(c["points"] for c in row["rubrics"] if c["points"] < 0) / sum(
+        c["points"] for c in row["rubrics"] if c["points"] > 0
+    )
+    assert reward == lower_bound < 0
+    assert terminated or truncated
+    assert info["evaluation_completed"] and not info["mask_sample"]
 
 
 async def test_urgent_case_does_not_reward_delayed_escalation(tmp_path):

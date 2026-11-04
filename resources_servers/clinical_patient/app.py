@@ -20,7 +20,7 @@ from resources_servers.gymnasium.base import GymnasiumServer
 class ClinicalPatientConfig(ClinicalConsultationConfig):
     REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.UNSUPPORTED
     name: str = "clinical_patient"
-    reward_mode: Literal["additive", "protocol"] = "additive"
+    reward_mode: Literal["rar_holistic", "additive", "protocol"] = "rar_holistic"
     max_turns: int = Field(default=6, ge=1, le=6)
     question_keys: list[str] = Field(
         default_factory=lambda: ["red_flag", "observation_recorded", "setting"], min_length=1
@@ -146,7 +146,7 @@ class ClinicalPatientServer(GymnasiumServer, ClinicalConsultationServer):
                 state["done"] = True
                 return (
                     None,
-                    0,
+                    self.task_failure_reward(case),
                     False,
                     True,
                     self._episode_info(state) | {"failure_kind": "clinical_patient:turn_limit"},
@@ -178,7 +178,13 @@ class ClinicalPatientServer(GymnasiumServer, ClinicalConsultationServer):
         }
         # These are synthetic task-contract gates, not a claim to verify medical truth.
         if not (evidence_complete and urgency_correct and escalation_timely):
-            return None, 0, True, False, info | {"failure_kind": "clinical_patient:incomplete_decision"}
+            return (
+                None,
+                self.task_failure_reward(case),
+                True,
+                False,
+                info | {"failure_kind": "clinical_patient:incomplete_decision"},
+            )
         terminal_case = case.model_copy(update={"reference_answer": case.patient.reference_plan})
         records: list[dict[str, JsonValue]] = []
         try:
@@ -231,7 +237,7 @@ class ClinicalPatientServer(GymnasiumServer, ClinicalConsultationServer):
         state["done"] = truncated
         return (
             observation,
-            0,
+            self.task_failure_reward(self.get_case(state["case_id"])) if truncated else 0,
             False,
             truncated,
             self._episode_info(state) | {"failure_kind": "clinical_patient:invalid_action"},

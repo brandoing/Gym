@@ -12,7 +12,7 @@ clinical_patient:
       entrypoint: app.py
       case_bank_path: ${oc.env:CASE_BANK_PATH}
       case_bank_sha256: ${oc.env:CASE_BANK_SHA256}
-      reward_mode: ${oc.env:CLINICAL_REWARD_MODE,additive}
+      reward_mode: ${oc.env:CLINICAL_REWARD_MODE,rar_holistic}
       judge_model_revision: ${oc.env:JUDGE_MODEL_REVISION,null}
       judge_model_server:
         type: responses_api_models

@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 from pathlib import Path
 from time import perf_counter
 from typing import ClassVar, Literal
@@ -121,7 +122,7 @@ class ClinicalConsultationConfig(BaseResourcesServerConfig):
     name: str = "clinical_consultation"
     case_bank_path: str
     case_bank_sha256: str = Field(pattern=r"^[0-9a-fA-F]{64}$")
-    reward_mode: Literal["additive", "protocol"] = "additive"
+    reward_mode: Literal["rar_holistic", "additive", "protocol"] = "rar_holistic"
     judge_model_server: ModelServerRef
     judge_model_revision: str | None = None
     judge_chat_completion_params: NeMoGymChatCompletionCreateParamsNonStreaming
@@ -179,7 +180,11 @@ class ClinicalConsultationServer(SimpleResourcesServer):
             )
         answer = body.response.output_text
         if not answer.strip():
-            return ClinicalVerifyResponse(**(result | {"reward": 0, "raw_score": 0, "mask_sample": False}))
+            reward = self.task_failure_reward(case)
+            raw_score = 1.0 if self.config.reward_mode == "rar_holistic" else reward
+            return ClinicalVerifyResponse(
+                **(result | {"reward": reward, "raw_score": raw_score, "mask_sample": False})
+            )
         try:
             raw_score, reward = await self.grade(case, answer, records=records)
         except JudgeError as error:
@@ -189,6 +194,14 @@ class ClinicalConsultationServer(SimpleResourcesServer):
         return ClinicalVerifyResponse(
             **(result | {"reward": reward, "raw_score": raw_score, "mask_sample": False, "judge_calls": len(records)})
         )
+
+    def task_failure_reward(self, case: ClinicalCase) -> float:
+        """Use the case's reward floor so silence cannot beat a penalized answer."""
+        if self.config.reward_mode == "additive":
+            return sum(r.points for r in case.rubrics if r.points < 0) / sum(
+                r.points for r in case.rubrics if r.points > 0
+            )
+        return 0.0
 
     @staticmethod
     def failure_fields(kind: str, reason: str) -> dict[str, JsonValue]:
@@ -215,6 +228,23 @@ class ClinicalConsultationServer(SimpleResourcesServer):
             },
             ensure_ascii=False,
         )
+        if self.config.reward_mode == "rar_holistic":
+            verdict = await self._judge(
+                "Evaluate the candidate using this case-specific rubric and the reference answer. "
+                "Positive points identify desired behavior; negative points identify harmful or incorrect behavior. "
+                "Consider the importance and severity of the criteria together, including omissions and unsafe "
+                "recommendations; do not merely count criteria or reward length. "
+                "Give one overall score from 1 (fails the case, or seriously unsafe) to 10 "
+                "(fully satisfies the case's requirements without material errors). "
+                'Return JSON {"score": number, "rationale": string}. Case rubric: '
+                + json.dumps([r.model_dump() for r in case.rubrics], ensure_ascii=False),
+                context,
+                check_id="overall",
+                numeric=True,
+                records=records,
+            )
+            score = float(verdict["score"])
+            return score, (score - 1) / 9
         if self.config.reward_mode == "additive":
             score = 0.0
             for criterion in case.rubrics:
@@ -246,10 +276,17 @@ class ClinicalConsultationServer(SimpleResourcesServer):
                 )
                 passed += int(verdict["criteria_met"])
             score = passed / len(case.protocols)
-        return score, max(0.0, min(1.0, score))
+        # Preserve penalty ordering instead of collapsing all negative answers to zero.
+        return score, score
 
     async def _judge(
-        self, guide: str, context: str, *, check_id: str, records: list[dict[str, JsonValue]]
+        self,
+        guide: str,
+        context: str,
+        *,
+        check_id: str,
+        records: list[dict[str, JsonValue]],
+        numeric: bool = False,
     ) -> dict[str, JsonValue]:
         params = self.config.judge_chat_completion_params.model_copy(deep=True)
         params.messages = [
@@ -288,7 +325,13 @@ class ClinicalConsultationServer(SimpleResourcesServer):
                 parsed = json.loads(content if isinstance(content, str) else "")
                 if not isinstance(parsed, dict):
                     raise ValueError("Judge verdict must be a JSON object")
-                if not isinstance(parsed.get("criteria_met"), bool):
+                if numeric:
+                    value = parsed.get("score")
+                    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                        raise ValueError("Judge score must be finite and numeric")
+                    if not 1 <= value <= 10:
+                        raise ValueError("Judge score must be between 1 and 10")
+                elif not isinstance(parsed.get("criteria_met"), bool):
                     raise ValueError("Judge criteria_met must be boolean")
                 record |= {"status": "completed", "verdict": parsed}
                 return parsed

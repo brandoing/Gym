@@ -8,7 +8,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import math
 from pathlib import Path
 from time import perf_counter
 from typing import ClassVar, Literal
@@ -122,7 +121,7 @@ class ClinicalConsultationConfig(BaseResourcesServerConfig):
     name: str = "clinical_consultation"
     case_bank_path: str
     case_bank_sha256: str = Field(pattern=r"^[0-9a-fA-F]{64}$")
-    reward_mode: Literal["likert", "rar_holistic", "additive", "protocol"] = "rar_holistic"
+    reward_mode: Literal["additive", "protocol"] = "additive"
     judge_model_server: ModelServerRef
     judge_model_revision: str | None = None
     judge_chat_completion_params: NeMoGymChatCompletionCreateParamsNonStreaming
@@ -216,19 +215,6 @@ class ClinicalConsultationServer(SimpleResourcesServer):
             },
             ensure_ascii=False,
         )
-        if self.config.reward_mode in {"likert", "rar_holistic"}:
-            guide = "Evaluate clinical correctness, relevant context seeking, safety, clarity and proportionality."
-            if self.config.reward_mode == "rar_holistic":
-                guide += " Apply this case-specific rubric: " + json.dumps([r.model_dump() for r in case.rubrics])
-            verdict = await self._judge(
-                guide + '\nGive one overall score from 1 to 10. Return JSON {"score": number, "rationale": string}.',
-                context,
-                check_id="overall",
-                numeric=True,
-                records=records,
-            )
-            score = float(verdict["score"])
-            return score, (score - 1) / 9
         if self.config.reward_mode == "additive":
             score = 0.0
             for criterion in case.rubrics:
@@ -237,7 +223,6 @@ class ClinicalConsultationServer(SimpleResourcesServer):
                     + criterion.criterion,
                     context,
                     check_id=criterion.id,
-                    numeric=False,
                     records=records,
                 )
                 score += criterion.points if verdict["criteria_met"] else 0
@@ -257,7 +242,6 @@ class ClinicalConsultationServer(SimpleResourcesServer):
                     "required criteria hold AND NO disqualifying behavior occurs. " + json.dumps(guide),
                     context,
                     check_id=dimension.id,
-                    numeric=False,
                     records=records,
                 )
                 passed += int(verdict["criteria_met"])
@@ -265,7 +249,7 @@ class ClinicalConsultationServer(SimpleResourcesServer):
         return score, max(0.0, min(1.0, score))
 
     async def _judge(
-        self, guide: str, context: str, *, check_id: str, numeric: bool, records: list[dict[str, JsonValue]]
+        self, guide: str, context: str, *, check_id: str, records: list[dict[str, JsonValue]]
     ) -> dict[str, JsonValue]:
         params = self.config.judge_chat_completion_params.model_copy(deep=True)
         params.messages = [
@@ -304,13 +288,7 @@ class ClinicalConsultationServer(SimpleResourcesServer):
                 parsed = json.loads(content if isinstance(content, str) else "")
                 if not isinstance(parsed, dict):
                     raise ValueError("Judge verdict must be a JSON object")
-                if numeric:
-                    value = parsed.get("score")
-                    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
-                        raise ValueError("Judge score must be finite and numeric")
-                    if not 1 <= value <= 10:
-                        raise ValueError("Judge score must be between 1 and 10")
-                elif not isinstance(parsed.get("criteria_met"), bool):
+                if not isinstance(parsed.get("criteria_met"), bool):
                     raise ValueError("Judge criteria_met must be boolean")
                 record |= {"status": "completed", "verdict": parsed}
                 return parsed

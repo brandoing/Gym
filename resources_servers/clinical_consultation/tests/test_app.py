@@ -59,16 +59,49 @@ def case():
 def clinical_case(scenario="documentation", *, user_type="clinician"):
     """A source-contract test record; no actual clinical generation is claimed."""
     bucket = {"documentation": "documentation", "evidence_research": "research"}.get(scenario, "consult")
+    rubrics = [
+        {"id": "faithful", "criterion": "Distinguishes recorded facts from missing details", "points": 5},
+        {"id": "clear", "criterion": "Uses clear wording", "points": 2},
+        {
+            "id": "invented",
+            "criterion": "Invents a detail absent from the source",
+            "points": -5,
+            "tags": ["unsupported_claim"],
+        },
+        {
+            "id": "mistake",
+            "criterion": "Assumes an unrecorded detail is normal",
+            "points": -5,
+            "tags": ["tempting_mistake"],
+        },
+        {"id": "padding", "criterion": "Adds irrelevant material", "points": -2, "tags": ["padding"]},
+    ]
+    if scenario == "documentation":
+        rubrics[2]["tags"].append("invented_fact")
+        rubrics.append(
+            {"id": "omitted", "criterion": "Omits an essential source fact", "points": -4, "tags": ["omitted_fact"]}
+        )
+    if scenario == "urgent_escalation":
+        rubrics.append(
+            {
+                "id": "delay",
+                "criterion": "Buries required emergency action after the first sentence",
+                "points": -6,
+                "tags": ["delayed_escalation"],
+            }
+        )
+    if scenario == "context_seeking":
+        rubrics[4]["tags"].append("irrelevant_question")
     return case() | {
         "scenario": scenario,
         "benchmark_bucket": bucket,
         "user_type": user_type,
         "messages": [{"role": "user", "content": "Summarize only the facts in the supplied source excerpt."}],
         "reference_answer": "The supplied source does not record the missing detail.",
-        "rubrics": [
-            {"id": "faithful", "criterion": "Distinguishes recorded facts from missing details", "points": 4},
-            {"id": "invented", "criterion": "Invents a detail absent from the source", "points": -5},
-        ],
+        "rubrics": rubrics,
+        "key_decision_criterion_id": "faithful",
+        "plausible_wrong_answer": "The source records an invented detail.",
+        "contrast_failure_criterion_ids": ["invented"],
         "protocols": [],
         "patient": None,
         "provenance": {"source_id": "unit-test-source", "source_kind": "unit_test", "approved_for_training": False},
@@ -265,6 +298,9 @@ async def test_tagged_tasks_use_private_case_rubric_without_patient_episode(tmp_
                 scenario="FORGED_SCENARIO",
                 benchmark_bucket="FORGED_BUCKET",
                 user_type="FORGED_AUDIENCE",
+                key_decision_criterion_id="FORGED_DECISION",
+                plausible_wrong_answer="FORGED_CONTRAST",
+                contrast_failure_criterion_ids=["FORGED_FAILURE"],
             )
         )
     params = judge.call_args.kwargs["json"]
@@ -273,9 +309,22 @@ async def test_tagged_tasks_use_private_case_rubric_without_patient_episode(tmp_
     assert context["benchmark_bucket"] == row["benchmark_bucket"]
     assert context["user_type"] == user_type
     assert context["reference_answer"] == row["reference_answer"]
+    assert context["key_decision_criterion_id"] == "faithful"
+    assert "plausible_wrong_answer" not in context and "contrast_failure_criterion_ids" not in context
     assert "Distinguishes recorded facts" in params.messages[0]["content"]
     assert "FORGED_" not in json.dumps(params.model_dump())
-    assert not {"scenario", "benchmark_bucket", "user_type", "patient"} & result.model_dump().keys()
+    assert (
+        not {
+            "scenario",
+            "benchmark_bucket",
+            "user_type",
+            "patient",
+            "key_decision_criterion_id",
+            "plausible_wrong_answer",
+            "contrast_failure_criterion_ids",
+        }
+        & result.model_dump().keys()
+    )
     assert result.reward == pytest.approx(7 / 9) and result.judge_calls == 1 and not result.mask_sample
 
 
@@ -326,6 +375,98 @@ def test_wiring_fixture_cannot_claim_training_approval():
     row["provenance"]["approved_for_training"] = True
     with pytest.raises(ValueError, match="cannot be approved"):
         ClinicalCase.model_validate(row)
+
+
+@pytest.mark.parametrize("key", [None, "unknown", "invented", "clear"])
+def test_key_decision_must_be_a_highest_weight_positive_criterion(key):
+    with pytest.raises(ValueError, match="highest-weight positive"):
+        ClinicalCase.model_validate(clinical_case() | {"key_decision_criterion_id": key})
+
+
+@pytest.mark.parametrize("count", [3, 9])
+def test_real_rubric_size_is_bounded(count):
+    row = clinical_case()
+    row["rubrics"] = row["rubrics"][:count]
+    while len(row["rubrics"]) < count:
+        row["rubrics"].append({"id": f"extra-{len(row['rubrics'])}", "criterion": "Extra check", "points": 1})
+    with pytest.raises(ValueError, match="4-8"):
+        ClinicalCase.model_validate(row)
+
+
+def test_real_rubric_requires_three_distinct_negative_criteria():
+    row = clinical_case("uncertainty")
+    row["rubrics"][3]["points"] = 1
+    with pytest.raises(ValueError, match="at least three negative"):
+        ClinicalCase.model_validate(row)
+
+
+def test_base_negative_tags_cannot_collapse_onto_one_criterion():
+    row = clinical_case("uncertainty")
+    for criterion in row["rubrics"]:
+        criterion["tags"] = []
+    row["rubrics"][2]["tags"] = ["tempting_mistake", "unsupported_claim", "padding"]
+    with pytest.raises(ValueError, match="three distinct negative criteria"):
+        ClinicalCase.model_validate(row)
+
+
+@pytest.mark.parametrize(
+    "scenario,tag",
+    [
+        ("uncertainty", "tempting_mistake"),
+        ("uncertainty", "unsupported_claim"),
+        ("uncertainty", "padding"),
+        ("urgent_escalation", "delayed_escalation"),
+        ("context_seeking", "irrelevant_question"),
+        ("documentation", "omitted_fact"),
+        ("documentation", "invented_fact"),
+    ],
+)
+def test_required_negative_behavior_tags_cannot_be_missing_or_only_positive(scenario, tag):
+    row = clinical_case(scenario)
+    for criterion in row["rubrics"]:
+        criterion["tags"] = [value for value in criterion.get("tags", []) if value != tag]
+    row["rubrics"][0]["tags"].append(tag)
+    with pytest.raises(ValueError, match="missing required behavior tags"):
+        ClinicalCase.model_validate(row)
+
+
+@pytest.mark.parametrize("answer", [None, "", "  ", "The supplied source does not record the missing detail."])
+def test_wrong_answer_must_be_nonempty_and_different(answer):
+    with pytest.raises(ValueError, match="plausible_wrong_answer"):
+        ClinicalCase.model_validate(clinical_case() | {"plausible_wrong_answer": answer})
+
+
+@pytest.mark.parametrize("ids", [[], ["unknown"], ["faithful"], ["invented", "invented"]])
+def test_contrast_failure_ids_must_reference_distinct_negative_criteria(ids):
+    with pytest.raises(ValueError, match="contrast_failure_criterion_ids"):
+        ClinicalCase.model_validate(clinical_case() | {"contrast_failure_criterion_ids": ids})
+
+
+@pytest.mark.parametrize("turns", [1, 3, 5])
+@pytest.mark.parametrize("system", [False, True])
+def test_real_single_or_multiturn_histories_are_accepted(turns, system):
+    row = clinical_case()
+    row["messages"] = ([{"role": "system", "content": "Use supplied evidence."}] if system else []) + [
+        {"role": "user" if index % 2 == 0 else "assistant", "content": f"Turn {index}"} for index in range(turns)
+    ]
+    assert ClinicalCase.model_validate(row).messages == row["messages"]
+
+
+@pytest.mark.parametrize(
+    "roles",
+    [
+        ["assistant", "user"],
+        ["user", "user", "user"],
+        ["user", "system", "user"],
+        ["system", "system", "user"],
+        ["user", "assistant", "user", "assistant", "user", "assistant", "user"],
+    ],
+)
+def test_invalid_real_history_structure_fails(roles):
+    with pytest.raises(ValueError, match="Clinical history"):
+        ClinicalCase.model_validate(
+            clinical_case() | {"messages": [{"role": role, "content": "Text"} for role in roles]}
+        )
 
 
 @pytest.mark.parametrize("mode, floor", [("rar_holistic", 0), ("additive", -1.5), ("protocol", 0)])
@@ -528,6 +669,9 @@ async def test_simple_agent_keeps_private_case_off_policy_requests_and_retains_t
             "scenario",
             "benchmark_bucket",
             "user_type",
+            "key_decision_criterion_id",
+            "plausible_wrong_answer",
+            "contrast_failure_criterion_ids",
         }
         & visible_requests[0].keys()
     )

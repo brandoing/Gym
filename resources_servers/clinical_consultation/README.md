@@ -9,7 +9,8 @@ remain `verified: false`; fixture tests are not evidence of clinical quality or 
 Set `CASE_BANK_PATH` to a UTF-8 JSONL bank and `CASE_BANK_SHA256` to its SHA-256.
 Each real bank row contains `case_id`, `family_id`, `split`, `scenario`,
 `benchmark_bucket`, `user_type`, `messages`, `reference_answer`, `rubrics`
-(`id`, `criterion`, `points`), and `provenance`. `protocols`
+(`id`, `criterion`, `points`, optional `tags`), `key_decision_criterion_id`,
+`plausible_wrong_answer`, `contrast_failure_criterion_ids`, and `provenance`. `protocols`
 (`id`, `criteria`, `failure_criteria`) and `patient` are optional. When present,
 the patient object contains `initial_observation`, `facts`, `required_facts`,
 `expected_urgency`, and `reference_plan`. Documentation and research response tasks
@@ -47,6 +48,30 @@ wiring fixtures without admitting untagged legacy cases as real clinical trainin
 data. Existing real banks need explicit taxonomy tags; no silent migration occurs.
 These categories organize independent training tasks; they do not establish
 benchmark coverage, clinical validity or transfer to HealthBench/Professional.
+
+Real cases must have 4–8 criteria, at least three of them negative. The declared
+`key_decision_criterion_id` identifies a positive criterion with at least the
+weight of every other positive criterion. Negative criteria collectively cover
+`tempting_mistake`, `unsupported_claim` and `padding` tags on three distinct
+negative criterion IDs. Urgent escalation also
+requires `delayed_escalation`; context seeking requires `irrelevant_question`;
+documentation requires both `omitted_fact` and `invented_fact`. A criterion may
+cover multiple tags. The actual criterion text still needs source and clinical
+review: merely supplying a tag does not establish the intended behavior.
+
+The private `plausible_wrong_answer` differs from the reference, and
+`contrast_failure_criterion_ids` lists the negative criteria it is intended to
+trigger. These fields support a separate reference-versus-wrong-answer judge
+qualification check. They are neither policy input nor supplied as a comparison
+answer during normal policy grading, and schema validation does not establish
+that the judge actually distinguishes them.
+
+Real conversations contain either a single user message or 2–4 prior messages
+before the final user message, alternating user/assistant, with an optional
+initial system message. Dataset-level history proportions are generation/export
+constraints. The verifier checks each history's structure but cannot establish
+that a whole training split has the intended mix. Wiring fixtures retain their
+existing small rubrics and do not acquire these clinical content requirements.
 
 ## Reward modes
 

@@ -9,6 +9,7 @@ import asyncio
 import hashlib
 import json
 import math
+from itertools import product
 from pathlib import Path
 from time import perf_counter
 from typing import ClassVar, Literal
@@ -55,6 +56,7 @@ class Criterion(BaseModel):
     id: str = Field(min_length=1)
     criterion: str = Field(min_length=1)
     points: float = Field(strict=True, allow_inf_nan=False)
+    tags: list[str] = Field(default_factory=list)
 
 
 class ProtocolDimension(BaseModel):
@@ -88,6 +90,9 @@ class ClinicalCase(BaseModel):
     messages: list[dict[str, str]] = Field(min_length=1)
     reference_answer: str = Field(min_length=1)
     rubrics: list[Criterion] = Field(min_length=1)
+    key_decision_criterion_id: str | None = None
+    plausible_wrong_answer: str | None = None
+    contrast_failure_criterion_ids: list[str] = Field(default_factory=list)
     protocols: list[ProtocolDimension] = Field(default_factory=list)
     patient: PatientCase | None = None
     provenance: dict[str, JsonValue]
@@ -133,7 +138,57 @@ class ClinicalCase(BaseModel):
                 raise ValueError("Protocol requirements need positive points and failure clauses negative points")
         if self.patient is not None and set(self.patient.required_facts) - self.patient.facts.keys():
             raise ValueError("Patient required_facts references an unknown fact")
+        if not fixture:
+            self._validate_real_task()
         return self
+
+    def _validate_real_task(self) -> None:
+        """Check the declared task structure; semantic correctness still needs review."""
+        if not 4 <= len(self.rubrics) <= 8 or any(r.points == 0 for r in self.rubrics):
+            raise ValueError("Clinical tasks require 4-8 nonzero-weight criteria")
+        weights = {r.id: r.points for r in self.rubrics}
+        decision_weight = weights.get(self.key_decision_criterion_id or "", 0)
+        if decision_weight <= 0 or decision_weight < max(weights.values()):
+            raise ValueError("key_decision_criterion_id must identify a highest-weight positive criterion")
+        for rubric in self.rubrics:
+            if len(set(rubric.tags)) != len(rubric.tags) or any(not tag.strip() for tag in rubric.tags):
+                raise ValueError("Criterion tags must be unique nonempty strings")
+        negatives = {r.id: r for r in self.rubrics if r.points < 0}
+        if len(negatives) < 3:
+            raise ValueError("Clinical tasks require at least three negative criteria")
+        required_tags = {"tempting_mistake", "unsupported_claim", "padding"}
+        required_tags.update(
+            {
+                "urgent_escalation": {"delayed_escalation"},
+                "context_seeking": {"irrelevant_question"},
+                "documentation": {"omitted_fact", "invented_fact"},
+            }.get(self.scenario, set())
+        )
+        present_tags = {tag for rubric in negatives.values() for tag in rubric.tags}
+        if required_tags - present_tags:
+            raise ValueError("Clinical negative criteria are missing required behavior tags")
+        base_tag_ids = [
+            [rubric.id for rubric in negatives.values() if tag in rubric.tags]
+            for tag in ("tempting_mistake", "unsupported_claim", "padding")
+        ]
+        if not any(len(set(ids)) == 3 for ids in product(*base_tag_ids)):
+            raise ValueError("Tempting mistake, unsupported claim and padding need three distinct negative criteria")
+        if not self.plausible_wrong_answer or not self.plausible_wrong_answer.strip():
+            raise ValueError("Clinical tasks require a plausible_wrong_answer")
+        if self.plausible_wrong_answer.strip() == self.reference_answer.strip():
+            raise ValueError("plausible_wrong_answer must differ from reference_answer")
+        contrast_ids = self.contrast_failure_criterion_ids
+        if not contrast_ids or len(set(contrast_ids)) != len(contrast_ids) or set(contrast_ids) - negatives.keys():
+            raise ValueError("contrast_failure_criterion_ids must identify unique negative criteria")
+        history = self.messages[1:] if self.messages[0].get("role") == "system" else self.messages
+        if len(history) not in (1, 3, 5):
+            raise ValueError("Clinical history needs a single user turn or 2-4 prior alternating turns")
+        if any(
+            message.get("role") != ("user" if index % 2 == 0 else "assistant") for index, message in enumerate(history)
+        ):
+            raise ValueError("Clinical history must alternate user/assistant and end in user")
+        if any(not message.get("content", "").strip() for message in self.messages):
+            raise ValueError("Clinical conversation messages must have nonempty content")
 
 
 def load_case_bank(path: str, expected_sha256: str) -> dict[str, ClinicalCase]:
@@ -215,6 +270,9 @@ class ClinicalConsultationServer(SimpleResourcesServer):
             "scenario",
             "benchmark_bucket",
             "user_type",
+            "key_decision_criterion_id",
+            "plausible_wrong_answer",
+            "contrast_failure_criterion_ids",
         ):
             result.pop(key, None)
         result |= {"reward_mode": self.config.reward_mode, "judge_records": records}
@@ -276,6 +334,7 @@ class ClinicalConsultationServer(SimpleResourcesServer):
                 scenario=case.scenario,
                 benchmark_bucket=case.benchmark_bucket,
                 user_type=case.user_type,
+                key_decision_criterion_id=case.key_decision_criterion_id,
             )
         context = json.dumps(context_fields, ensure_ascii=False)
         if self.config.reward_mode == "rar_holistic":

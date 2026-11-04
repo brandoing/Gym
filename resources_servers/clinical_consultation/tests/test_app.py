@@ -109,7 +109,7 @@ def completion(content):
 
 @pytest.mark.parametrize("mode", ["likert", "rar_holistic"])
 async def test_holistic_score_and_accounting(tmp_path, mode):
-    server = make_server(tmp_path, reward_mode=mode)
+    server = make_server(tmp_path, reward_mode=mode, judge_model_revision="fixture-rev-1")
     with patch(
         "resources_servers.clinical_consultation.app.call_judge",
         AsyncMock(return_value=completion('{"score": 7, "rationale": "Appropriate stop."}')),
@@ -120,6 +120,7 @@ async def test_holistic_score_and_accounting(tmp_path, mode):
     assert result.judge_calls == 1
     assert not result.mask_sample
     assert result.judge_records[0]["usage"]["total_tokens"] == 14
+    assert result.judge_records[0]["judge_model_revision"] == "fixture-rev-1"
     params = judge.call_args.kwargs["json"]
     assert "Stop the simulation." in params.messages[1]["content"]
     assert ("Stops the simulation" in params.messages[0]["content"]) == (mode == "rar_holistic")

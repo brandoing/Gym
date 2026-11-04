@@ -124,6 +124,7 @@ class ClinicalConsultationConfig(BaseResourcesServerConfig):
     case_bank_sha256: str = Field(pattern=r"^[0-9a-fA-F]{64}$")
     reward_mode: Literal["likert", "rar_holistic", "additive", "protocol"] = "rar_holistic"
     judge_model_server: ModelServerRef
+    judge_model_revision: str | None = None
     judge_chat_completion_params: NeMoGymChatCompletionCreateParamsNonStreaming
     judge_endpoint_max_concurrency: int = Field(default=16, ge=1)
     judge_max_attempts: int = Field(default=3, ge=1)
@@ -276,7 +277,12 @@ class ClinicalConsultationServer(SimpleResourcesServer):
             {"role": "user", "content": context},
         ]
         for attempt in range(1, self.config.judge_max_attempts + 1):
-            record: dict[str, JsonValue] = {"check_id": check_id, "attempt": attempt, "status": "failed"}
+            record: dict[str, JsonValue] = {
+                "check_id": check_id,
+                "attempt": attempt,
+                "status": "failed",
+                "judge_model_revision": self.config.judge_model_revision,
+            }
             records.append(record)
             started = perf_counter()
             try:

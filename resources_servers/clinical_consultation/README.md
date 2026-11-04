@@ -38,7 +38,9 @@ Concurrency is per server process, not a deployment-wide quota or spend limit.
 
 ## Run
 
-Provide `JUDGE_BASE_URL`, `JUDGE_MODEL_NAME`, and `JUDGE_API_KEY` privately. The judge
+Provide `JUDGE_BASE_URL`, `JUDGE_MODEL_NAME`, and `JUDGE_API_KEY` privately. Set
+`JUDGE_MODEL_REVISION` to the deployment's resolved revision; it is retained with
+each judgement. A missing revision is recorded as unknown, not inferred from an alias. The judge
 must be distinct from the training policy server. Compose this environment with the
 model-server configuration appropriate to your policy:
 

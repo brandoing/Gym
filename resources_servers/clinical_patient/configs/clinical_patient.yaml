@@ -25,6 +25,8 @@ clinical_patient:
       judge_max_attempts: 3
       judge_timeout_seconds: 120
       max_turns: 6
+      question_keys: [red_flag, observation_recorded, setting]
+      urgency_labels: [routine, urgent]
       domain: knowledge
       verified: false
       description: Conditional patient evidence selection and bounded consultation completion

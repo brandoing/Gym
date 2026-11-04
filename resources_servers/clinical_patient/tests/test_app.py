@@ -5,6 +5,8 @@ import hashlib
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from nemo_gym.judge import JudgeError
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.server_utils import ServerClient
@@ -35,6 +37,8 @@ def make_server(tmp_path, *, cases=None, **overrides):
         case_bank_sha256=hashlib.sha256(bank.read_bytes()).hexdigest(),
         judge_model_server={"type": "responses_api_models", "name": "judge_model"},
         judge_chat_completion_params={"messages": [], "temperature": 0, "max_tokens": 1024},
+        question_keys=["color"],
+        urgency_labels=["routine", "urgent"],
         **overrides,
     )
     return ClinicalPatientServer(config=config, server_client=MagicMock(spec=ServerClient))
@@ -166,6 +170,34 @@ async def test_sessions_are_isolated_and_unknown_questions_reveal_nothing(tmp_pa
     )
     assert "unavailable" in info["tool_outputs"][0]["output"]
     assert server.session_state["two"]["turns"] == 1
+
+
+async def test_protected_cases_cannot_change_training_observation(tmp_path):
+    train = patient_case()
+    audit = patient_case(case_id="audit-only", family_id="audit-family", split="audit")
+    audit["patient"]["facts"]["audit_private_key"] = "private audit value"
+    audit["patient"]["expected_urgency"] = "audit_private_urgency"
+    without_audit = make_server(tmp_path, cases=[train])
+    with_audit = make_server(tmp_path, cases=[train, audit])
+    first, first_info = await without_audit.reset({"case_id": "fixture-1"}, "train")
+    second, second_info = await with_audit.reset({"case_id": "fixture-1"}, "train")
+    assert first == second and first_info == second_info
+    assert "audit_private_key" not in second and "audit_private_urgency" not in second
+    with pytest.raises(ValueError, match="public patient ontology") as error:
+        await with_audit.reset({"case_id": "audit-only"}, "audit")
+    assert "audit_private_key" not in str(error.value) and "audit_private_urgency" not in str(error.value)
+
+
+async def test_undeclared_bank_fact_is_not_a_policy_tool(tmp_path):
+    row = patient_case()
+    row["patient"]["facts"]["private_annotation"] = "This must stay private."
+    server = make_server(tmp_path, cases=[row])
+    observation, _ = await server.reset({"case_id": "fixture-1"}, "one")
+    assert "private_annotation" not in observation
+    _, _, _, _, info = await server.step(
+        action("ask_patient", {"question_key": "private_annotation"}), {"case_id": "fixture-1"}, "one"
+    )
+    assert json.loads(info["tool_outputs"][0]["output"])["answer"] == "That evidence is unavailable."
 
 
 async def test_judge_error_remains_masked_in_terminal_info(tmp_path):

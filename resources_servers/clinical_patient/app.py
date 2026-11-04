@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 from typing import ClassVar, Literal
 
-from pydantic import Field, JsonValue
+from pydantic import Field, JsonValue, model_validator
 
 from nemo_gym.base_resources_server import ReverifyMode
 from nemo_gym.judge import JudgeError
@@ -22,6 +22,18 @@ class ClinicalPatientConfig(ClinicalConsultationConfig):
     name: str = "clinical_patient"
     reward_mode: Literal["likert", "rar_holistic"] = "rar_holistic"
     max_turns: int = Field(default=6, ge=1, le=6)
+    question_keys: list[str] = Field(
+        default_factory=lambda: ["red_flag", "observation_recorded", "setting"], min_length=1
+    )
+    urgency_labels: list[str] = Field(default_factory=lambda: ["routine", "urgent"], min_length=1)
+
+    @model_validator(mode="after")
+    def validate_public_ontology(self) -> ClinicalPatientConfig:
+        """Keep the public action vocabulary explicit and free of ambiguous entries."""
+        for values in (self.question_keys, self.urgency_labels):
+            if len(set(values)) != len(values) or any(not value.strip() or value != value.strip() for value in values):
+                raise ValueError("Public patient ontology needs unique, nonempty, trimmed entries")
+        return self
 
 
 class ClinicalPatientServer(GymnasiumServer, ClinicalConsultationServer):
@@ -38,6 +50,11 @@ class ClinicalPatientServer(GymnasiumServer, ClinicalConsultationServer):
         if not session_id:
             raise ValueError("Clinical patient reset requires an isolated session ID")
         case = self.get_case(metadata.get("case_id", ""))
+        if (
+            set(case.patient.required_facts) - set(self.config.question_keys)
+            or case.patient.expected_urgency not in self.config.urgency_labels
+        ):
+            raise ValueError("Case is incompatible with the configured public patient ontology")
         if session_id in self.session_state:
             state = self.session_state[session_id]
             if state["case_id"] != case.case_id or state["turns"]:
@@ -52,9 +69,9 @@ class ClinicalPatientServer(GymnasiumServer, ClinicalConsultationServer):
                 "done": False,
                 "history": list(case.messages),
             }
-        # A shared menu does not identify which evidence exists or matters in this case.
-        keys = sorted({key for entry in self._cases.values() for key in entry.patient.facts})
-        urgency_labels = sorted({entry.patient.expected_urgency for entry in self._cases.values()})
+        # Never infer the public action vocabulary from private development/audit cases.
+        keys = self.config.question_keys
+        urgency_labels = self.config.urgency_labels
         observation = (
             case.patient.initial_observation
             + "\nAvailable evidence keys: "
@@ -116,7 +133,7 @@ class ClinicalPatientServer(GymnasiumServer, ClinicalConsultationServer):
             key = arguments["question_key"]
             if key in state["asked_keys"]:
                 state["repeated_questions"] += 1
-            if key in case.patient.facts:
+            if key in self.config.question_keys and key in case.patient.facts:
                 if key not in state["asked_keys"]:
                     state["asked_keys"].append(key)
                 answer = case.patient.facts[key]

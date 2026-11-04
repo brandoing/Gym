@@ -9,7 +9,7 @@ No separately hosted patient model is required. Configurations remain unverified
 ## Episode
 
 1. `/reset` loads the case identified by the task's opaque `case_id`. The policy sees
-   the initial observation and a bank-wide menu of evidence keys and urgency labels.
+   the initial observation and an explicitly configured menu of evidence keys and urgency labels.
    Private values, references, rubric criteria and required-fact labels are not disclosed.
 2. `ask_patient(question_key)` returns only that fact. Unknown keys return an
    unavailable-evidence observation. Repeated requests are counted, not rewarded.
@@ -29,7 +29,14 @@ metadata; patient tool outputs are observations, not assistant training targets.
 
 ## Data and configuration
 
-Use the same authenticated case bank as `clinical_consultation`, with `CASE_BANK_PATH`
+Set `question_keys` and `urgency_labels` in the environment config before training.
+They are a public action ontology, independent of the private case bank. Development
+or audit cases must not expand the training menu. Undeclared evidence keys are never
+revealed, even when present in a case. Reset rejects a case whose required evidence
+or expected urgency cannot be represented by the configured ontology, without
+including its hidden keys or labels in the error message.
+
+Use the same authenticated case-bank format as `clinical_consultation`, with `CASE_BANK_PATH`
 and `CASE_BANK_SHA256`. Public rows contain `case_id`, `responses_create_params`
 and an `agent_ref` named `clinical_patient_agent`. Provide the two function schemas
 in `responses_create_params.tools`, with `parallel_tool_calls: false`:
@@ -40,6 +47,8 @@ in `responses_create_params.tools`, with `parallel_tool_calls: false`:
 Both schemas disallow additional properties and require all listed arguments.
 They contain no case-specific answers or private references. The policy must issue
 exactly one supported function call per assistant turn.
+The included fictional example bank is `data/example-casebank.jsonl`; its labels
+use the example config's public ontology. Compute and supply its SHA-256 before use.
 
 Provide the remote judge through `JUDGE_BASE_URL`, `JUDGE_MODEL_NAME`,
 `JUDGE_MODEL_REVISION` and private `JUDGE_API_KEY`. `CLINICAL_REWARD_MODE` accepts

@@ -43,6 +43,12 @@ and `CASE_BANK_SHA256`. Public rows contain `case_id`, `responses_create_params`
 and an `agent_ref` named `clinical_patient_agent`. Provide the two function schemas
 in `responses_create_params.tools`, with `parallel_tool_calls: false`:
 
+The bank may also contain response-only documentation, research or consultation
+cases without patient metadata. They belong in the fixed-history response export;
+interactive export includes only cases with an explicit patient contract. Reset
+rejects response-only rows before creating a session. Do not invent patient facts
+or an urgency decision simply to make a documentation or research task interactive.
+
 - `ask_patient`: one string `question_key`.
 - `finish_consultation`: string `urgency` and `plan`.
 

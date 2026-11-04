@@ -10,7 +10,7 @@ import pytest
 from nemo_gym.judge import JudgeError
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.server_utils import ServerClient
-from resources_servers.clinical_consultation.tests.test_app import case, completion
+from resources_servers.clinical_consultation.tests.test_app import case, clinical_case, completion
 from resources_servers.clinical_patient.app import ClinicalPatientConfig, ClinicalPatientServer
 
 
@@ -221,6 +221,19 @@ async def test_protected_cases_cannot_change_training_observation(tmp_path):
     with pytest.raises(ValueError, match="public patient ontology") as error:
         await with_audit.reset({"case_id": "audit-only"}, "audit")
     assert "audit_private_key" not in str(error.value) and "audit_private_urgency" not in str(error.value)
+
+
+@pytest.mark.parametrize("scenario,bucket", [("documentation", "documentation"), ("evidence_research", "research")])
+async def test_response_only_cases_cannot_start_patient_episode(tmp_path, scenario, bucket):
+    response_only = clinical_case(scenario) | {"case_id": "response-only"}
+    response_only.update(benchmark_bucket=bucket, user_type="clinician", patient=None)
+    response_only["provenance"]["source_kind"] = "approved_source_excerpt"
+    server = make_server(tmp_path, cases=[patient_case(), response_only])
+    with pytest.raises(ValueError, match="Response-only case"):
+        await server.reset({"case_id": "response-only"}, "wrong-route")
+    assert "wrong-route" not in server.session_state
+    observation, _ = await server.reset({"case_id": "fixture-1"}, "patient-route")
+    assert "color" in observation
 
 
 async def test_undeclared_bank_fact_is_not_a_policy_tool(tmp_path):

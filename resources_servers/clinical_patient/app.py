@@ -50,6 +50,8 @@ class ClinicalPatientServer(GymnasiumServer, ClinicalConsultationServer):
         if not session_id:
             raise ValueError("Clinical patient reset requires an isolated session ID")
         case = self.get_case(metadata.get("case_id", ""))
+        if case.patient is None:
+            raise ValueError("Response-only case cannot be used in the interactive patient environment")
         if (
             set(case.patient.required_facts) - set(self.config.question_keys)
             or case.patient.expected_urgency not in self.config.urgency_labels

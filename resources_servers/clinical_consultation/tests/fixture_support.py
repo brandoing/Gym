@@ -25,10 +25,11 @@ def fixture_server() -> ClinicalConsultationServer:
     )
     server = ClinicalConsultationServer(config=config, server_client=MagicMock(spec=ServerClient))
 
-    async def judge(guide, context, *, check_id, numeric, records):
-        score = 10 if json.loads(context)["candidate"] == "Stop the simulation." else 1
+    async def judge(guide, context, *, check_id, records):
+        answer = json.loads(context)["candidate"]
+        criteria_met = answer == ("Continue the simulation." if check_id == "unsafe" else "Stop the simulation.")
         records.append({"check_id": check_id, "attempt": 1, "status": "fixture"})
-        return {"score": score, "rationale": "Deterministic fixture judge"}
+        return {"criteria_met": criteria_met, "rationale": "Deterministic fixture judge"}
 
     server._judge = AsyncMock(side_effect=judge)
     return server

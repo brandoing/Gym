@@ -18,16 +18,20 @@ Never put references or rubric criteria in the policy input.
 
 ## Reward modes
 
+Every prompt has its own private rubric. The judge returns a boolean verdict for
+each criterion or protocol dimension, never an overall quality rating.
 Select `CLINICAL_REWARD_MODE`:
 
-- `likert`: one reference-conditioned overall quality judgement, without the case rubric.
-- `rar_holistic`: the same judgement, with the case rubric. Both modes use a 1–10
-  raw score mapped to `(score - 1) / 9`; they differ only in case-specific rubric access.
-- `additive`: one boolean judgement per criterion, signed points divided by positive
+- `additive` (default): one boolean judgement per criterion, signed points divided by positive
   possible points. Raw scores remain available; only training rewards are clipped to [0,1].
 - `protocol`: one boolean judgement per protocol dimension. A dimension requires
   all its positive requirements and no failure clause; reward is the proportion of
   dimensions passed. This is a protocol-inspired aggregation, not a reproduction claim.
+
+For example, an escalation prompt can require timely escalation and penalize
+unnecessary delay; an evidence-interpretation prompt can require a correct absolute
+difference and penalize an unsupported individual-outcome guarantee. These criteria
+come from the selected case rather than a fixed generic rubric.
 
 Judge criteria and references are server-side. Candidate text is framed as untrusted
 data. Empty policy answers score zero; unavailable or unusable judgements are masked

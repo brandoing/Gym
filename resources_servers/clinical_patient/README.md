@@ -16,8 +16,8 @@ No separately hosted patient model is required. Configurations remain unverified
 3. `finish_consultation(urgency, plan)` ends the episode. Required evidence must have
    been requested and urgency must match the case contract. Urgent-escalation cases
    require completion on the first turn. These are synthetic task gates, not a medical verifier.
-4. The terminal judge reads the visible interaction and final plan against
-   `patient.reference_plan` and the case rubric. Missing evidence, incorrect urgency,
+4. The terminal judge checks the prompt's rubric criteria against the visible
+   interaction and final plan, grounded in `patient.reference_plan`. Missing evidence, incorrect urgency,
    delayed escalation or failure to finish within six assistant turns scores zero.
    Unavailable judging masks the episode instead of treating it as a clinical failure.
 
@@ -52,8 +52,10 @@ use the example config's public ontology. Compute and supply its SHA-256 before 
 
 Provide the remote judge through `JUDGE_BASE_URL`, `JUDGE_MODEL_NAME`,
 `JUDGE_MODEL_REVISION` and private `JUDGE_API_KEY`. `CLINICAL_REWARD_MODE` accepts
-`rar_holistic` or `likert`; the final judge runs once per eligible completed episode,
-before bounded retries. Preserve judge usage/cost alongside policy training cost.
+`additive` (default) or `protocol`. Additive mode checks each prompt-specific criterion
+and aggregates signed points; protocol mode checks conjunctive dimensions. The number
+of judge calls depends on those checks and bounded retries. No overall quality scale
+is used. Preserve judge usage/cost alongside policy training cost.
 
 Compose `resources_servers/clinical_patient/configs/clinical_patient.yaml` with the
 policy model configuration. NeMo RL uses

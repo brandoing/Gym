@@ -20,7 +20,7 @@ from resources_servers.gymnasium.base import GymnasiumServer
 class ClinicalPatientConfig(ClinicalConsultationConfig):
     REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.UNSUPPORTED
     name: str = "clinical_patient"
-    reward_mode: Literal["likert", "rar_holistic"] = "rar_holistic"
+    reward_mode: Literal["additive", "protocol"] = "additive"
     max_turns: int = Field(default=6, ge=1, le=6)
     question_keys: list[str] = Field(
         default_factory=lambda: ["red_flag", "observation_recorded", "setting"], min_length=1

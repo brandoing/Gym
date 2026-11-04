@@ -82,7 +82,8 @@ async def test_conditional_disclosure_and_full_transcript_terminal_grading(tmp_p
     assert reward == 0 and not terminated and not truncated
     assert json.loads(info["tool_outputs"][0]["output"]) == {"question_key": "color", "answer": "red"}
     with patch(
-        "resources_servers.clinical_consultation.app.call_judge", AsyncMock(return_value=completion('{"score":10}'))
+        "resources_servers.clinical_consultation.app.call_judge",
+        AsyncMock(side_effect=[completion('{"criteria_met":true}'), completion('{"criteria_met":false}')]),
     ) as judge:
         _, reward, terminated, truncated, info = await server.step(
             action("finish_consultation", {"urgency": "routine", "plan": "Stop the simulation."}),
@@ -90,7 +91,7 @@ async def test_conditional_disclosure_and_full_transcript_terminal_grading(tmp_p
             "one",
         )
     assert reward == 1 and terminated and not truncated
-    assert info["evidence_complete"] and info["judge_calls"] == 1
+    assert info["evidence_complete"] and info["judge_calls"] == 2
     context = json.loads(judge.call_args.kwargs["json"].messages[1]["content"])
     assert "ask_patient" in context["conversation"] and "red" in context["conversation"]
     assert context["reference_answer"] == patient_case()["patient"]["reference_plan"]
@@ -111,18 +112,27 @@ async def test_cannot_finish_without_required_evidence_or_correct_urgency(tmp_pa
     judge.assert_not_called()
 
 
-async def test_known_information_can_complete_without_questioning(tmp_path):
+@pytest.mark.parametrize("mode", ["additive", "protocol"])
+async def test_known_information_can_complete_without_questioning(tmp_path, mode):
     row = patient_case()
     row["patient"]["required_facts"] = []
-    server = make_server(tmp_path, cases=[row])
+    server = make_server(tmp_path, cases=[row], reward_mode=mode)
     await server.reset({"case_id": "fixture-1"}, "one")
     with patch(
-        "resources_servers.clinical_consultation.app.call_judge", AsyncMock(return_value=completion('{"score":10}'))
+        "resources_servers.clinical_consultation.app.call_judge",
+        AsyncMock(side_effect=[completion('{"criteria_met":true}'), completion('{"criteria_met":false}')]),
     ):
         _, reward, terminated, _, info = await server.step(
             action("finish_consultation", {"urgency": "routine", "plan": "Stop."}), {"case_id": "fixture-1"}, "one"
         )
     assert reward == 1 and terminated and info["asked_keys"] == []
+    assert info["judge_calls"] == (2 if mode == "additive" else 1)
+
+
+@pytest.mark.parametrize("removed_mode", ["likert", "rar_holistic"])
+def test_patient_rejects_overall_rating_modes(tmp_path, removed_mode):
+    with pytest.raises(ValueError, match="reward_mode"):
+        make_server(tmp_path, reward_mode=removed_mode)
 
 
 async def test_urgent_case_does_not_reward_delayed_escalation(tmp_path):

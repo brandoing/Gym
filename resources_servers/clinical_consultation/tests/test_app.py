@@ -133,13 +133,65 @@ async def test_rubric_verdicts_and_accounting(tmp_path, mode):
     assert all(isinstance(record["verdict"]["criteria_met"], bool) for record in result.judge_records)
 
 
-@pytest.mark.parametrize("removed_mode", ["likert", "rar_holistic"])
-def test_overall_rating_modes_are_rejected(tmp_path, removed_mode):
+def test_plain_likert_is_rejected(tmp_path):
     with pytest.raises(ValueError, match="reward_mode"):
-        make_server(tmp_path, reward_mode=removed_mode)
+        make_server(tmp_path, reward_mode="likert")
 
 
-async def test_each_prompt_uses_its_own_rubric(tmp_path):
+@pytest.mark.parametrize("score, reward", [(1, 0), (5.5, 0.5), (10, 1)])
+async def test_holistic_default_normalizes_one_case_rubric_judgement(tmp_path, score, reward):
+    server = make_server(tmp_path, judge_model_revision="fixture-rev-1")
+    assert server.config.reward_mode == "rar_holistic"
+    with patch(
+        "resources_servers.clinical_consultation.app.call_judge",
+        AsyncMock(return_value=completion(json.dumps({"score": score, "rationale": "Case rubric applied."}))),
+    ) as judge:
+        result = await server.verify(request())
+    assert result.raw_score == score and result.reward == reward
+    assert result.evaluation_completed and not result.mask_sample and result.judge_calls == 1
+    params = judge.call_args.kwargs["json"]
+    assert "Stops the simulation" in params.messages[0]["content"]
+    assert "Continues the simulation" in params.messages[0]["content"]
+    assert '"points": -3.0' in params.messages[0]["content"]
+    context = json.loads(params.messages[1]["content"])
+    assert context == {
+        "conversation": case()["messages"],
+        "reference_answer": case()["reference_answer"],
+        "candidate": request().response.output_text,
+    }
+    record = result.judge_records[0]
+    assert record["check_id"] == "overall" and record["verdict"]["score"] == score
+    assert record["judge_model_revision"] == "fixture-rev-1"
+    assert record["usage"]["total_tokens"] == 14
+
+
+@pytest.mark.parametrize(
+    "verdict",
+    [
+        "not JSON",
+        "[]",
+        "{}",
+        '{"score":true}',
+        '{"score":"10"}',
+        '{"score":0}',
+        '{"score":11}',
+        '{"score":NaN}',
+        '{"score":Infinity}',
+        '{"criteria_met":true}',
+    ],
+)
+async def test_invalid_holistic_judgement_is_masked_after_bounded_retries(tmp_path, verdict):
+    server = make_server(tmp_path, judge_max_attempts=2)
+    with patch("resources_servers.clinical_consultation.app.call_judge", AsyncMock(return_value=completion(verdict))):
+        result = await server.verify(request())
+    assert result.mask_sample and not result.evaluation_completed and result.judge_calls == 2
+    assert result.raw_score is None
+    assert all(record["status"] == "failed" for record in result.judge_records)
+    assert result.model_dump()["instance_config"]["mask_sample"]
+
+
+@pytest.mark.parametrize("mode", ["rar_holistic", "additive"])
+async def test_each_prompt_uses_its_own_rubric(tmp_path, mode):
     first = case()
     second = case() | {
         "case_id": "fixture-2",
@@ -147,13 +199,13 @@ async def test_each_prompt_uses_its_own_rubric(tmp_path):
         "rubrics": [{"id": "difference", "criterion": "Explains the absolute event difference", "points": 2}],
         "protocols": [],
     }
-    server = make_server(tmp_path, cases=[first, second])
-    assert server.config.reward_mode == "additive"
+    server = make_server(tmp_path, cases=[first, second], reward_mode=mode)
     with patch(
         "resources_servers.clinical_consultation.app.call_judge",
-        AsyncMock(return_value=completion('{"criteria_met":true}')),
+        AsyncMock(return_value=completion('{"score":10}' if mode == "rar_holistic" else '{"criteria_met":true}')),
     ) as judge:
-        await server.verify(request(case_id="fixture-2"))
+        result = await server.verify(request(case_id="fixture-2"))
+    assert result.reward == 1 and result.evaluation_completed and not result.mask_sample
     assert judge.call_count == 1
     prompt = judge.call_args.kwargs["json"].messages[0]["content"]
     assert "Explains the absolute event difference" in prompt and "Stops the simulation" not in prompt
@@ -163,19 +215,21 @@ async def test_request_cannot_override_private_bank(tmp_path):
     server = make_server(tmp_path)
     with patch(
         "resources_servers.clinical_consultation.app.call_judge",
-        AsyncMock(return_value=completion('{"criteria_met": true}')),
+        AsyncMock(return_value=completion('{"score":10}')),
     ) as judge:
         result = await server.verify(request(reference_answer="LEAK", rubrics=[{"criterion": "LEAK"}]))
     assert "LEAK" not in json.dumps(judge.call_args.kwargs["json"].model_dump())
     assert "reference_answer" not in result.model_dump()
     assert "rubrics" not in result.model_dump()
+    assert result.reward == 1 and not result.mask_sample
 
 
-async def test_empty_policy_output_is_a_task_failure_without_judging(tmp_path):
-    server = make_server(tmp_path)
+@pytest.mark.parametrize("mode, floor", [("rar_holistic", 0), ("additive", -1.5), ("protocol", 0)])
+async def test_empty_policy_output_is_a_task_failure_without_judging(tmp_path, mode, floor):
+    server = make_server(tmp_path, reward_mode=mode)
     with patch("resources_servers.clinical_consultation.app.call_judge", AsyncMock()) as judge:
         result = await server.verify(request(" "))
-    assert result.reward == 0 and result.evaluation_completed and not result.mask_sample
+    assert result.reward == floor and result.evaluation_completed and not result.mask_sample
     assert result.judge_calls == 0
     judge.assert_not_called()
 
@@ -184,7 +238,7 @@ async def test_empty_policy_output_is_a_task_failure_without_judging(tmp_path):
     "verdict", ["not JSON", '{"criteria_met": "true"}', '{"criteria_met": 1}', '{"score": 10}', "{}"]
 )
 async def test_invalid_judge_output_masks_after_bounded_attempts(tmp_path, verdict):
-    server = make_server(tmp_path, judge_max_attempts=2)
+    server = make_server(tmp_path, reward_mode="additive", judge_max_attempts=2)
     with patch("resources_servers.clinical_consultation.app.call_judge", AsyncMock(return_value=completion(verdict))):
         result = await server.verify(request())
     assert result.mask_sample and not result.evaluation_completed
@@ -214,8 +268,27 @@ async def test_additive_preserves_negative_raw_score(tmp_path):
         ),
     ):
         result = await server.verify(request())
-    assert result.raw_score == -1.5 and result.reward == 0
+    assert result.raw_score == -1.5 and result.reward == -1.5
     assert result.judge_calls == 2
+
+
+async def test_additive_preserves_penalty_severity_ordering(tmp_path):
+    bank_case = case() | {
+        "rubrics": case()["rubrics"] + [{"id": "minor", "criterion": "Delays unnecessarily", "points": -1}]
+    }
+    server = make_server(tmp_path, cases=[bank_case], reward_mode="additive")
+    rewards = []
+    for flags in [(False, False, True), (False, True, False)]:
+        with patch(
+            "resources_servers.clinical_consultation.app.call_judge",
+            AsyncMock(side_effect=[completion(json.dumps({"criteria_met": flag})) for flag in flags]),
+        ):
+            result = await server.verify(request())
+        assert result.raw_score == result.reward
+        rewards.append(result.reward)
+    empty = await server.verify(request(""))
+    assert empty.reward == -2 < rewards[1] == -1.5 < rewards[0] == -0.5
+    assert all(reward < 0 for reward in rewards)
 
 
 async def test_protocol_judges_conjunction_with_failure_clauses(tmp_path):
@@ -259,7 +332,7 @@ def test_invalid_protocol_bank_fails_before_judging(tmp_path, protocols):
 
 
 async def test_endpoint_concurrency_is_bounded_and_accounting_is_per_response(tmp_path):
-    server = make_server(tmp_path, judge_endpoint_max_concurrency=2)
+    server = make_server(tmp_path, reward_mode="additive", judge_endpoint_max_concurrency=2)
     active = peak = 0
 
     async def judge(*args, **kwargs):
@@ -328,7 +401,7 @@ async def test_simple_agent_keeps_private_case_off_policy_requests_and_retains_t
     client.post = AsyncMock(side_effect=post)
     with patch(
         "resources_servers.clinical_consultation.app.call_judge",
-        AsyncMock(side_effect=[completion('{"criteria_met":true}'), completion('{"criteria_met":false}')]),
+        AsyncMock(return_value=completion('{"score":10}')),
     ):
         result = await agent.run(
             MagicMock(cookies={}),

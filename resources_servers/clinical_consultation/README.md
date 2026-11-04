@@ -18,15 +18,30 @@ Never put references or rubric criteria in the policy input.
 
 ## Reward modes
 
-Every prompt has its own private rubric. The judge returns a boolean verdict for
-each criterion or protocol dimension, never an overall quality rating.
-Select `CLINICAL_REWARD_MODE`:
+Every prompt has its own private rubric. Select `CLINICAL_REWARD_MODE`:
 
-- `additive` (default): one boolean judgement per criterion, signed points divided by positive
-  possible points. Raw scores remain available; only training rewards are clipped to [0,1].
-- `protocol`: one boolean judgement per protocol dimension. A dimension requires
+- `rar_holistic` (default): the judge reads the conversation, reference answer and
+  complete case-specific rubric, then gives one overall 1–10 score. `raw_score`
+  retains that score; training reward is `(score - 1) / 9`. One call per response
+  before retries. This is rubric-conditioned scoring, not a generic Likert control.
+- `additive` (secondary): one boolean judgement per criterion, signed points divided
+  by positive possible points. The same signed value is returned as `raw_score` and
+  training reward, without clipping; more severe penalties remain distinguishable.
+  Its lower bound is the sum of negative points divided by positive possible points.
+- `protocol` (optional): one boolean judgement per protocol dimension. A dimension requires
   all its positive requirements and no failure clause; reward is the proportion of
   dimensions passed. This is a protocol-inspired aggregation, not a reproduction claim.
+
+The primary arm follows the implicit rubric-scoring approach in
+[Rubrics as Rewards, sections 2.2 and 4.4](https://arxiv.org/html/2507.17746v2).
+This is a RaR-style adaptation using the private reference and signed criteria,
+not an exact reproduction. The paper reports application-dependent tradeoffs
+between implicit and explicit aggregation; additive remains a useful secondary arm.
+
+Plain `likert` is unsupported. Compare the trained checkpoint with the unchanged
+model and matched controls; this design alone does not attribute gains specifically
+to rubric conditioning. The holistic prompt is independently implemented and has
+not yet been qualified with a live judge or shown to reproduce published results.
 
 For example, an escalation prompt can require timely escalation and penalize
 unnecessary delay; an evidence-interpretation prompt can require a correct absolute
@@ -34,7 +49,9 @@ difference and penalize an unsupported individual-outcome guarantee. These crite
 come from the selected case rather than a fixed generic rubric.
 
 Judge criteria and references are server-side. Candidate text is framed as untrusted
-data. Empty policy answers score zero; unavailable or unusable judgements are masked
+data. Empty policy answers receive the selected mode's minimum reward (including
+negative penalties in additive mode), so silence cannot beat a penalized answer.
+Unavailable or unusable judgements are masked
 infrastructure failures. Each client judge invocation records its check, attempt,
 ID/model, token usage when returned, latency, and status. `judge_calls` counts these
 invocations, including bounded retries; lower-level HTTP retries require endpoint telemetry.

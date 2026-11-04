@@ -13,7 +13,9 @@ from nemo_gym.openai_utils import NeMoGymChatCompletion
 from nemo_gym.server_utils import ServerClient
 from nemo_gym.verifier_fixture import exercise_verifier_fixture
 from resources_servers.clinical_consultation.app import (
+    CLINICAL_SCENARIOS,
     VERIFIER_FIXTURE,
+    ClinicalCase,
     ClinicalConsultationConfig,
     ClinicalConsultationServer,
     ClinicalVerifyRequest,
@@ -46,7 +48,30 @@ def case():
             "expected_urgency": "stop",
             "reference_plan": "Stop the simulation.",
         },
-        "provenance": {"source_id": "fictional", "approved_for_training": False},
+        "provenance": {
+            "source_id": "fictional",
+            "source_kind": "fictional_engineering_fixture",
+            "approved_for_training": False,
+        },
+    }
+
+
+def clinical_case(scenario="documentation", *, user_type="clinician"):
+    """A source-contract test record; no actual clinical generation is claimed."""
+    bucket = {"documentation": "documentation", "evidence_research": "research"}.get(scenario, "consult")
+    return case() | {
+        "scenario": scenario,
+        "benchmark_bucket": bucket,
+        "user_type": user_type,
+        "messages": [{"role": "user", "content": "Summarize only the facts in the supplied source excerpt."}],
+        "reference_answer": "The supplied source does not record the missing detail.",
+        "rubrics": [
+            {"id": "faithful", "criterion": "Distinguishes recorded facts from missing details", "points": 4},
+            {"id": "invented", "criterion": "Invents a detail absent from the source", "points": -5},
+        ],
+        "protocols": [],
+        "patient": None,
+        "provenance": {"source_id": "unit-test-source", "source_kind": "unit_test", "approved_for_training": False},
     }
 
 
@@ -224,6 +249,85 @@ async def test_request_cannot_override_private_bank(tmp_path):
     assert result.reward == 1 and not result.mask_sample
 
 
+@pytest.mark.parametrize("scenario", CLINICAL_SCENARIOS)
+@pytest.mark.parametrize("user_type", ["clinician", "patient"])
+async def test_tagged_tasks_use_private_case_rubric_without_patient_episode(tmp_path, scenario, user_type):
+    row = clinical_case(scenario, user_type=user_type)
+    server = make_server(tmp_path, cases=[row])
+    assert server.get_case("fixture-1").patient is None
+    with patch(
+        "resources_servers.clinical_consultation.app.call_judge",
+        AsyncMock(return_value=completion('{"score":8,"rationale":"Uses source faithfully."}')),
+    ) as judge:
+        result = await server.verify(
+            request(
+                "The supplied source does not record the missing detail.",
+                scenario="FORGED_SCENARIO",
+                benchmark_bucket="FORGED_BUCKET",
+                user_type="FORGED_AUDIENCE",
+            )
+        )
+    params = judge.call_args.kwargs["json"]
+    context = json.loads(params.messages[1]["content"])
+    assert context["scenario"] == scenario
+    assert context["benchmark_bucket"] == row["benchmark_bucket"]
+    assert context["user_type"] == user_type
+    assert context["reference_answer"] == row["reference_answer"]
+    assert "Distinguishes recorded facts" in params.messages[0]["content"]
+    assert "FORGED_" not in json.dumps(params.model_dump())
+    assert not {"scenario", "benchmark_bucket", "user_type", "patient"} & result.model_dump().keys()
+    assert result.reward == pytest.approx(7 / 9) and result.judge_calls == 1 and not result.mask_sample
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"scenario": "missing_information"},
+        {"scenario": "evidence_interpretation"},
+        {"scenario": "unknown"},
+        {"benchmark_bucket": None},
+        {"benchmark_bucket": "unknown"},
+        {"user_type": None},
+        {"user_type": "administrator"},
+        {"benchmark_bucket": "consult"},
+        {"scenario": "evidence_research", "benchmark_bucket": "consult"},
+    ],
+)
+def test_bad_real_task_tags_fail_before_judging(tmp_path, change):
+    with pytest.raises(ValueError):
+        make_server(tmp_path, cases=[clinical_case() | change])
+
+
+@pytest.mark.parametrize("missing", ["benchmark_bucket", "user_type"])
+def test_real_task_tags_are_required(missing):
+    row = clinical_case()
+    del row[missing]
+    with pytest.raises(ValueError, match="require benchmark_bucket and user_type"):
+        ClinicalCase.model_validate(row)
+
+
+def test_omitted_patient_is_valid_for_response_only_case():
+    row = clinical_case()
+    del row["patient"]
+    assert ClinicalCase.model_validate(row).patient is None
+
+
+@pytest.mark.parametrize("scenario", ["missing_information", "evidence_interpretation", "simulation"])
+def test_legacy_fixture_labels_require_explicit_wiring_provenance(scenario):
+    row = case() | {"scenario": scenario}
+    assert ClinicalCase.model_validate(row).scenario == scenario
+    row["provenance"].pop("source_kind")
+    with pytest.raises(ValueError, match="legacy labels"):
+        ClinicalCase.model_validate(row)
+
+
+def test_wiring_fixture_cannot_claim_training_approval():
+    row = case()
+    row["provenance"]["approved_for_training"] = True
+    with pytest.raises(ValueError, match="cannot be approved"):
+        ClinicalCase.model_validate(row)
+
+
 @pytest.mark.parametrize("mode, floor", [("rar_holistic", 0), ("additive", -1.5), ("protocol", 0)])
 async def test_empty_policy_output_is_a_task_failure_without_judging(tmp_path, mode, floor):
     server = make_server(tmp_path, reward_mode=mode)
@@ -360,7 +464,8 @@ async def test_unknown_case_is_masked_without_endpoint_calls(tmp_path):
 async def test_simple_agent_keeps_private_case_off_policy_requests_and_retains_tokens(tmp_path):
     from responses_api_agents.simple_agent.app import SimpleAgent, SimpleAgentConfig, SimpleAgentRunRequest
 
-    verifier = make_server(tmp_path)
+    bank_case = clinical_case()
+    verifier = make_server(tmp_path, cases=[bank_case])
     client = MagicMock(spec=ServerClient)
     client.global_config_dict = {"observability_enabled": False}
     agent = SimpleAgent(
@@ -408,12 +513,25 @@ async def test_simple_agent_keeps_private_case_off_policy_requests_and_retains_t
             SimpleAgentRunRequest.model_validate(
                 {
                     "case_id": "fixture-1",
-                    "responses_create_params": {"input": case()["messages"]},
+                    "responses_create_params": {"input": bank_case["messages"]},
                 }
             ),
         )
     assert len(visible_requests) == 1
-    assert not ({"case_id", "reference_answer", "rubrics", "patient", "provenance"} & visible_requests[0].keys())
+    assert not (
+        {
+            "case_id",
+            "reference_answer",
+            "rubrics",
+            "patient",
+            "provenance",
+            "scenario",
+            "benchmark_bucket",
+            "user_type",
+        }
+        & visible_requests[0].keys()
+    )
+    assert "Distinguishes recorded facts" not in json.dumps(visible_requests[0])
     assert result.reward == 1
     assert result.response.output[0].generation_token_ids == [12, 13]
     assert result.response.output[0].generation_log_probs == [-0.1, -0.2]

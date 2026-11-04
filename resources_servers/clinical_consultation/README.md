@@ -7,14 +7,46 @@ remain `verified: false`; fixture tests are not evidence of clinical quality or 
 ## Inputs and visibility
 
 Set `CASE_BANK_PATH` to a UTF-8 JSONL bank and `CASE_BANK_SHA256` to its SHA-256.
-Each bank row contains `case_id`, `family_id`, `split`, `scenario`, `messages`,
-`reference_answer`, `rubrics` (`id`, `criterion`, `points`), `protocols`
-(`id`, `criteria`, `failure_criteria`), `patient`, and `provenance`.
-The patient object contains `initial_observation`, `facts`, `required_facts`,
-`expected_urgency`, and `reference_plan`. The server authenticates and validates
+Each real bank row contains `case_id`, `family_id`, `split`, `scenario`,
+`benchmark_bucket`, `user_type`, `messages`, `reference_answer`, `rubrics`
+(`id`, `criterion`, `points`), and `provenance`. `protocols`
+(`id`, `criteria`, `failure_criteria`) and `patient` are optional. When present,
+the patient object contains `initial_observation`, `facts`, `required_facts`,
+`expected_urgency`, and `reference_plan`. Documentation and research response tasks
+do not need to invent patient facts or an urgency decision. The server authenticates and validates
 the bank at startup. Policy rows contain only the opaque `case_id`, public
 `responses_create_params.input`, and the `clinical_consultation_simple_agent` reference.
-Never put references or rubric criteria in the policy input.
+Never put references, rubric criteria or private task labels in the policy input.
+
+Real cases use one of these scenarios:
+
+| Scenario | Intended behavior |
+|---|---|
+| `context_seeking` | Ask for missing information that changes the recommendation |
+| `complete_information` | Answer directly when sufficient information is present |
+| `urgent_escalation` | Put emergency action first |
+| `safety_trap` | Stop, avoid or correct a harmful proposed action |
+| `documentation` | Transform supplied encounter facts faithfully into the requested document |
+| `evidence_research` | Critique or compare evidence and its limits |
+| `adversarial` | Correct false premises or resist unsafe pressure |
+| `global_health` | Account for the stated local setting and resource constraints |
+| `audience_tailoring` | Match depth and vocabulary to the actual user |
+| `uncertainty` | Express uncertainty warranted by missing or conflicting evidence |
+
+`benchmark_bucket` is `consult`, `documentation` or `research`; `user_type` is
+`clinician` or `patient`. A `documentation` scenario requires the documentation
+bucket and `evidence_research` requires research. The other scenarios describe
+behaviors that can occur across buckets. Every real case must supply both tags;
+they are interpreted by the judge alongside that case's own rubric and reference,
+not used as a generic score or shown to the policy.
+
+The old `missing_information` / `evidence_interpretation` labels and the example
+`simulation` label are accepted only when `provenance.source_kind` is
+`fictional_engineering_fixture` and `approved_for_training` is false. This preserves
+wiring fixtures without admitting untagged legacy cases as real clinical training
+data. Existing real banks need explicit taxonomy tags; no silent migration occurs.
+These categories organize independent training tasks; they do not establish
+benchmark coverage, clinical validity or transfer to HealthBench/Professional.
 
 ## Reward modes
 
@@ -30,7 +62,9 @@ Every prompt has its own private rubric. Select `CLINICAL_REWARD_MODE`:
   Its lower bound is the sum of negative points divided by positive possible points.
 - `protocol` (optional): one boolean judgement per protocol dimension. A dimension requires
   all its positive requirements and no failure clause; reward is the proportion of
-  dimensions passed. This is a protocol-inspired aggregation, not a reproduction claim.
+  dimensions passed. This mode requires protocol definitions in every evaluated
+  case; missing definitions are an infrastructure/configuration failure, not a zero
+  score for the policy. This is a protocol-inspired aggregation, not a reproduction claim.
 
 The primary arm follows the implicit rubric-scoring approach in
 [Rubrics as Rewards, sections 2.2 and 4.4](https://arxiv.org/html/2507.17746v2).

@@ -124,6 +124,73 @@ def make_server(tmp_path, *, cases=None, **overrides):
     return ClinicalConsultationServer(config=config, server_client=MagicMock(spec=ServerClient))
 
 
+def published_case():
+    return case() | {
+        "case_format": "rar_medicine_v1",
+        "scenario": "published_medical_qa",
+        "protocols": [],
+        "patient": None,
+        "rubrics": [
+            {"id": f"original-{i}", "criterion": f"Published requirement {i}", "points": 5 if i < 9 else -1}
+            for i in range(10)
+        ],
+        "provenance": {
+            "dataset": "anisha2102/RaR-Medicine",
+            "dataset_revision": "a" * 40,
+            "source_row_sha256": "b" * 64,
+            "source_split": "train",
+            "source_row_index": 0,
+            "source_kind": "published_rubric_task",
+            "approved_for_training": False,
+        },
+    }
+
+
+def test_published_contract_keeps_all_criteria_without_generated_tags():
+    parsed = ClinicalCase.model_validate(published_case())
+    assert len(parsed.rubrics) == 10
+    assert parsed.benchmark_bucket is None and parsed.user_type is None
+    assert parsed.plausible_wrong_answer is None
+    assert parsed.rubrics[-1].points == -1
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("dataset", "unrelated/dataset"),
+        ("dataset_revision", "main"),
+        ("source_row_sha256", "missing"),
+        ("source_split", "test"),
+        ("source_row_index", True),
+    ],
+)
+def test_published_contract_requires_identity_and_preserved_split(field, value):
+    row = published_case()
+    row["provenance"][field] = value
+    with pytest.raises(ValueError):
+        ClinicalCase.model_validate(row)
+
+
+@pytest.mark.parametrize("mode", ["additive", "protocol"])
+def test_published_contract_refuses_unqualified_signed_boolean_rewards(tmp_path, mode):
+    with pytest.raises(ValueError, match="require rar_holistic"):
+        make_server(tmp_path, cases=[published_case()], reward_mode=mode)
+
+
+async def test_published_holistic_passes_original_criteria_only_to_judge(tmp_path):
+    server = make_server(tmp_path, cases=[published_case()])
+    with patch.object(ClinicalConsultationServer, "_judge", new_callable=AsyncMock) as judge:
+        judge.return_value = {"score": 8, "rationale": "source requirements met"}
+        raw, reward = await server.grade(server.get_case("fixture-1"), "candidate", records=[])
+    assert raw == 8 and reward == pytest.approx(7 / 9)
+    assert judge.await_count == 1
+    guide, context = judge.call_args.args[:2]
+    assert "verbatim published criteria" in guide
+    assert all(f"Published requirement {i}" in guide for i in range(10))
+    assert "reference_answer" in json.loads(context)
+    assert "source_row_sha256" not in context
+
+
 def request(text="Stop the simulation.", **overrides):
     return ClinicalVerifyRequest.model_validate(
         {

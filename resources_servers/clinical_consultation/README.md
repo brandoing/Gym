@@ -75,6 +75,16 @@ existing small rubrics and do not acquire these clinical content requirements.
 
 ## Reward modes
 
+Released RaR-Medicine imports use the explicit `case_format: rar_medicine_v1`
+contract, with dataset/revision, original split/index and source-row SHA-256 in
+provenance. Their scenario is `published_medical_qa`; bucket/user annotations are
+absent rather than invented. They preserve the released question, reference and
+all criteria without imposing the generated-consultation rubric count or contrast
+requirements. Only `rar_holistic` is supported for this format: some published
+pitfalls are worded as desired avoidance, so signed boolean aggregation would
+misinterpret them. The holistic judge reads their intended requirements. This
+does not confer approval or reproduce the paper's entire training setup.
+
 Every prompt has its own private rubric. Select `CLINICAL_REWARD_MODE`:
 
 - `rar_holistic` (default): the judge reads the conversation, reference answer and

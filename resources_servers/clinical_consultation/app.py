@@ -56,7 +56,7 @@ class Criterion(BaseModel):
 
     id: str = Field(min_length=1)
     criterion: str = Field(min_length=1)
-    points: float = Field(strict=True, allow_inf_nan=False)
+    points: float | None = Field(strict=True, allow_inf_nan=False)
     tags: list[str] = Field(default_factory=list)
 
 
@@ -85,12 +85,14 @@ class ClinicalCase(BaseModel):
     case_id: str = Field(min_length=1)
     family_id: str = Field(min_length=1)
     split: Literal["train", "dev", "audit"]
-    case_format: Literal["clinical_consultation_v1", "rar_medicine_v1"] = "clinical_consultation_v1"
+    case_format: Literal["clinical_consultation_v1", "rar_medicine_v1", "published_rubric_v1"] = (
+        "clinical_consultation_v1"
+    )
     scenario: str
     benchmark_bucket: Literal["consult", "documentation", "research"] | None = None
     user_type: Literal["clinician", "patient"] | None = None
     messages: list[dict[str, str]] = Field(min_length=1)
-    reference_answer: str = Field(min_length=1)
+    reference_answer: str | None = Field(default=None, min_length=1)
     rubrics: list[Criterion] = Field(min_length=1)
     key_decision_criterion_id: str | None = None
     plausible_wrong_answer: str | None = None
@@ -103,8 +105,15 @@ class ClinicalCase(BaseModel):
     def validate_private_case(self) -> ClinicalCase:
         """Validate private task tags, criteria and optional evidence-selection data."""
         fixture = self.provenance.get("source_kind") == "fictional_engineering_fixture"
-        published = self.case_format == "rar_medicine_v1"
-        if published:
+        published = self.case_format in ("rar_medicine_v1", "published_rubric_v1")
+        if self.case_format != "published_rubric_v1":
+            if not self.reference_answer or not self.reference_answer.strip():
+                raise ValueError("Generated, fixture and RaR cases require a reference answer")
+            if any(r.points is None for r in self.rubrics):
+                raise ValueError("Generated, fixture and RaR criteria require numerical weights")
+        if self.case_format == "published_rubric_v1":
+            self._validate_released_rubrics()
+        elif published:
             self._validate_published_task()
         elif fixture:
             if self.scenario not in FIXTURE_SCENARIOS or self.provenance.get("approved_for_training") is not False:
@@ -120,7 +129,10 @@ class ClinicalCase(BaseModel):
             if required_bucket and self.benchmark_bucket != required_bucket:
                 raise ValueError("Clinical scenario does not match benchmark_bucket")
         ids = [rubric.id for rubric in self.rubrics]
-        if len(set(ids)) != len(ids) or not any(r.points > 0 for r in self.rubrics):
+        unweighted = all(r.points is None for r in self.rubrics)
+        if len(set(ids)) != len(ids) or (
+            not unweighted and not any(r.points is not None and r.points > 0 for r in self.rubrics)
+        ):
             raise ValueError("Case needs unique criterion IDs and positive possible points")
         if self.messages[-1].get("role") != "user":
             raise ValueError("Fixed history must end with a user message")
@@ -146,6 +158,50 @@ class ClinicalCase(BaseModel):
         if not fixture and not published:
             self._validate_real_task()
         return self
+
+    def _validate_released_rubrics(self) -> None:
+        """Accept pinned published annotations without inventing missing references or weights."""
+        sources = {
+            "anisha2102/RaR-Medicine": {"train": "train", "val": "dev", "test": "audit"},
+            "ScaleAI/RaR-Medicine": {"train": "train", "val": "dev", "test": "audit"},
+            "sojuL/RubricHub_v1": {"train": "train"},
+            "Estrellajer/ProRubric": {"train": "train", "test": "audit"},
+            "AQ-MedAI/ClinAlign": {"public_demo": "train"},
+        }
+        dataset = str(self.provenance.get("dataset", ""))
+        source_split = str(self.provenance.get("source_split", ""))
+        if sources.get(dataset, {}).get(source_split) != self.split:
+            raise ValueError("Published rubric task requires a supported source and preserved upstream split")
+        if self.provenance.get("source_kind") != "published_rubric_task":
+            raise ValueError("Published tasks must declare their source kind")
+        if not re.fullmatch(r"(?:[0-9a-f]{40}|sha256:[0-9a-f]{64})", str(self.provenance.get("dataset_revision", ""))):
+            raise ValueError("Published task needs a Git revision or content-addressed release")
+        if not re.fullmatch(r"[0-9a-f]{64}", str(self.provenance.get("source_row_sha256", ""))):
+            raise ValueError("Published task needs source_row_sha256")
+        index = self.provenance.get("source_row_index")
+        if type(index) is not int or index < 0 or not self.provenance.get("source_file"):
+            raise ValueError("Published task needs its source file and row index")
+        if (
+            self.scenario != "published_clinical_task"
+            or self.benchmark_bucket is not None
+            or self.user_type is not None
+        ):
+            raise ValueError("Do not invent consultation taxonomy for published tasks")
+        if self.patient is not None or self.protocols:
+            raise ValueError("Published protocol annotations stay in provenance; only holistic grading is qualified")
+        if any(
+            m.get("role") not in ("system", "user", "assistant") or not m.get("content", "").strip()
+            for m in self.messages
+        ):
+            raise ValueError("Published conversations require nonempty original messages")
+        if self.reference_answer is not None and not self.reference_answer.strip():
+            raise ValueError("Use null for an unreleased reference, not an empty answer")
+        unweighted = dataset == "AQ-MedAI/ClinAlign"
+        if any(
+            not r.criterion.strip() or (r.points is not None if unweighted else r.points is None or r.points == 0)
+            for r in self.rubrics
+        ):
+            raise ValueError("Preserve source weights; ClinAlign doctor criteria are explicitly unweighted")
 
     def _validate_published_task(self) -> None:
         """Preserve released RaR tasks without inventing consultation annotations."""
@@ -280,9 +336,9 @@ class ClinicalConsultationServer(SimpleResourcesServer):
         super().model_post_init(context)
         self._cases = load_case_bank(self.config.case_bank_path, self.config.case_bank_sha256)
         if self.config.reward_mode != "rar_holistic" and any(
-            case.case_format == "rar_medicine_v1" for case in self._cases.values()
+            case.case_format in ("rar_medicine_v1", "published_rubric_v1") for case in self._cases.values()
         ):
-            raise ValueError("Published RaR criteria require rar_holistic; signed boolean semantics are not assumed")
+            raise ValueError("Published criteria require rar_holistic; signed boolean semantics are not assumed")
         self._judge_slots = asyncio.Semaphore(self.config.judge_endpoint_max_concurrency)
 
     def get_case(self, case_id: str) -> ClinicalCase:
@@ -362,9 +418,10 @@ class ClinicalConsultationServer(SimpleResourcesServer):
         """Score the same reference-grounded case under a selected reward design."""
         context_fields = {
             "conversation": conversation or case.messages,
-            "reference_answer": case.reference_answer,
             "candidate": answer,
         }
+        if case.reference_answer is not None:
+            context_fields["reference_answer"] = case.reference_answer
         if case.benchmark_bucket is not None and case.user_type is not None:
             context_fields.update(
                 scenario=case.scenario,
@@ -378,11 +435,13 @@ class ClinicalConsultationServer(SimpleResourcesServer):
                 "These are verbatim published criteria: use their descriptions as the requirements. "
                 "Negative-weight pitfall descriptions may be phrased as things to avoid; do not invert "
                 "their intended meaning or mechanically sum weights. "
-                if case.case_format == "rar_medicine_v1"
+                if case.case_format in ("rar_medicine_v1", "published_rubric_v1")
                 else "Positive points identify desired behavior; negative points identify harmful or incorrect behavior. "
             )
             verdict = await self._judge(
-                "Evaluate the candidate using this case-specific rubric and the reference answer. "
+                "Evaluate the candidate using this case-specific rubric and the reference answer when supplied. "
+                "An absent reference is not a missing candidate requirement. Null points mean the source supplied "
+                "unweighted criteria; assess their clinical importance without inventing numerical weights. "
                 + rubric_guide
                 + "Consider the importance and severity of the criteria together, including omissions and unsafe "
                 "recommendations; do not merely count criteria or reward length. "

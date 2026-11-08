@@ -85,6 +85,16 @@ pitfalls are worded as desired avoidance, so signed boolean aggregation would
 misinterpret them. The holistic judge reads their intended requirements. This
 does not confer approval or reproduce the paper's entire training setup.
 
+`published_rubric_v1` additionally accepts pinned RubricHub Medical, ProRubric
+Medical and ClinAlign public doctor-rubric imports. A content-addressed release
+(`sha256:<file hash>`) can identify releases without Git revisions. Original
+training/holdout splits, row hashes and source filenames remain required. An
+unreleased reference stays null and is omitted from the judge context. ClinAlign
+criteria retain null weights; the judge assesses their described importance
+without invented numerical weights. ProRubric's alternate dimensions stay in
+private provenance and do not change the holistic reward. This format supports
+only `rar_holistic`; generated-case validation remains unchanged.
+
 Every prompt has its own private rubric. Select `CLINICAL_REWARD_MODE`:
 
 - `rar_holistic` (default): the judge reads the conversation, reference answer and
@@ -109,8 +119,9 @@ between implicit and explicit aggregation; additive remains a useful secondary a
 
 Plain `likert` is unsupported. Compare the trained checkpoint with the unchanged
 model and matched controls; this design alone does not attribute gains specifically
-to rubric conditioning. The holistic prompt is independently implemented and has
-not yet been qualified with a live judge or shown to reproduce published results.
+to rubric conditioning. The holistic prompt is independently implemented. Retain
+live judge qualification with each run; transport and ranking probes do not
+establish clinical correctness or reproduce published results.
 
 For example, an escalation prompt can require timely escalation and penalize
 unnecessary delay; an evidence-interpretation prompt can require a correct absolute

@@ -1,0 +1,50 @@
+judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${oc.env:JUDGE_BASE_URL}
+      openai_api_key: ${oc.env:JUDGE_API_KEY}
+      openai_model: ${oc.env:JUDGE_MODEL_NAME}
+
+clinical_patient:
+  resources_servers:
+    clinical_patient:
+      entrypoint: app.py
+      case_bank_path: ${oc.env:CASE_BANK_PATH}
+      case_bank_sha256: ${oc.env:CASE_BANK_SHA256}
+      reward_mode: ${oc.env:CLINICAL_REWARD_MODE,rar_holistic}
+      judge_model_revision: ${oc.env:JUDGE_MODEL_REVISION,null}
+      judge_model_server:
+        type: responses_api_models
+        name: judge_model
+      judge_chat_completion_params:
+        messages: []
+        temperature: 0
+        max_tokens: 1024
+      judge_endpoint_max_concurrency: 16
+      judge_max_attempts: 3
+      judge_timeout_seconds: 120
+      max_turns: 6
+      question_keys: [red_flag, observation_recorded, setting]
+      urgency_labels: [routine, urgent]
+      domain: knowledge
+      verified: false
+      description: Conditional patient evidence selection and bounded consultation completion
+      value: Train choosing relevant evidence and reaching a terminal clinical response
+
+clinical_patient_agent:
+  responses_api_agents:
+    gymnasium_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: clinical_patient
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      max_steps: 6
+      text_only_history: false
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/clinical_patient/data/example.jsonl

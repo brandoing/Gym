@@ -314,6 +314,20 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
             terminated=step_data.terminated,
             truncated=step_data.truncated,
             info=step_data.info,
+            # Terminal verifier failures must remain masked at the trainer boundary.
+            **{
+                key: step_data.info[key]
+                for key in (
+                    "mask_sample",
+                    "evaluation_completed",
+                    "failure_kind",
+                    "failure_reason",
+                    "_ng_failure_class",
+                    "_ng_failure_judge_error",
+                    "instance_config",
+                )
+                if key in step_data.info
+            },
         )
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
